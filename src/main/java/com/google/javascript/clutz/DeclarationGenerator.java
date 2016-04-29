@@ -1922,6 +1922,8 @@ public class DeclarationGenerator {
   }
 
   private boolean isAliasedClassOrInterface(TypedVar symbol, JSType type) {
+    // Confusingly typedefs are constructors. However, they cannot be aliased AFAIKT.
+    if (type.isNoType()) return false;
     if (!type.isConstructor() && !type.isInterface()) return false;
     return !symbol.getName().equals(type.getDisplayName());
   }
