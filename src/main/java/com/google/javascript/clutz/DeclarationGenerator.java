@@ -55,6 +55,7 @@ import java.io.StringWriter;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -167,6 +168,11 @@ public class DeclarationGenerator {
   private final Set<String> privateEnums = new LinkedHashSet<>();
 
   /**
+   * If symbols x.y.z and x.y.w exist, childrenMap['x.y'] contains the TypedVars for z and w.
+   */
+  private HashMap<String, List<TypedVar>> childrenMap = new HashMap<>();
+
+  /**
    * Aggregates all emitted types, used in a final pass to find types emitted in type position but
    * not declared, possibly due to missing goog.provides.
    */
@@ -183,6 +189,20 @@ public class DeclarationGenerator {
 
   boolean hasErrors() {
     return errorManager.getErrorCount() > 0;
+  }
+
+  /**
+   * For efficiency, only iterate the global symbol set once, and store all data needed in hash
+   * maps.
+   */
+  void generateMaps() {
+    for (TypedVar var : compiler.getTopScope().getAllSymbols()) {
+      String namespace = getNamespace(var.getName());
+      if (!namespace.equals("")) {
+        if (!childrenMap.containsKey(namespace)) childrenMap.put(namespace, new ArrayList<TypedVar>());
+        childrenMap.get(namespace).add(var);
+      }
+    }
   }
 
   void generateDeclarations() {
@@ -213,6 +233,7 @@ public class DeclarationGenerator {
       Depgraph depgraph) throws AssertionError {
 
     compiler.compile(externs, sourceFiles, opts.getCompilerOptions());
+    generateMaps();
     String dts = produceDts(depgraph);
     errorManager.doGenerateReport();
     return dts;
@@ -1702,10 +1723,28 @@ public class DeclarationGenerator {
       }
 
       boolean foundNamespaceMembers = false;
-      for (String propName : getSortedPropertyNamesToEmit(type)) {
+      Set<NamedTypePair> innerProps = new TreeSet<>();
+      // No type means the symbol is a typedef.
+      if (type.isNoType() && childrenMap.containsKey(innerNamespace)) {
+        // For typedefs, the inner symbols are not accessible as properties.
+        // We iterate over all symbols to find possible inner symbols.
+        for (TypedVar symbol : childrenMap.get(innerNamespace)) {
+          if (getNamespace(symbol.getName()).equals(innerNamespace)) {
+            innerProps.add(new NamedTypePair(symbol.getType(),
+                getUnqualifiedName(symbol.getName())));
+          }
+        }
+      } else {
+        for (String propName : getSortedPropertyNamesToEmit(type)) {
+          innerProps.add(new NamedTypePair(type.getPropertyType(propName), propName));
+        }
+      }
+
+      for (NamedTypePair namedType : innerProps) {
+        String propName = namedType.name;
+        JSType pType = namedType.type;
         String qualifiedName = innerNamespace + '.' + propName;
         if (provides.contains(qualifiedName)) continue;
-        JSType pType = type.getPropertyType(propName);
         if (pType.isEnumType()) {
           if (!foundNamespaceMembers) {
             emitNamespaceBegin(innerNamespace);
@@ -1903,6 +1942,23 @@ public class DeclarationGenerator {
         return null;
       }
     }
+
+    private class NamedTypePair implements Comparable<NamedTypePair> {
+      private final String name;
+      private final JSType type;
+
+      NamedTypePair(JSType type, String name) {
+        this.type = type;
+        this.name = name;
+      }
+
+      @Override
+      public int compareTo(NamedTypePair other) {
+        int nameCmp = name.compareTo(other.name);
+        if (nameCmp != 0) return nameCmp;
+        return type.toString().compareTo(other.type.toString());
+      }
+    }
   }
 
   private boolean isFunctionPrototypeProp(String propName) {
@@ -1926,6 +1982,8 @@ public class DeclarationGenerator {
   }
 
   private boolean isAliasedClassOrInterface(TypedVar symbol, JSType type) {
+    // Confusingly typedefs are constructors. However, they cannot be aliased AFAIKT.
+    if (type.isNoType()) return false;
     if (!type.isConstructor() && !type.isInterface()) return false;
     return !symbol.getName().equals(type.getDisplayName());
   }
