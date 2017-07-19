@@ -483,7 +483,8 @@ class DeclarationGenerator {
         namespace = getNamespace(symbol.getName());
       }
       int valueSymbolsWalked =
-          declareNamespace(namespace, symbol, emitName, isDefault, transitiveProvides, false);
+          declareNamespace(
+              namespace, symbol, emitName, isDefault, transitiveProvides, false, depgraph);
 
       // skip emitting goog.require declarations for value empty namespaces, as calling typeof
       // does not work for them.
@@ -494,12 +495,14 @@ class DeclarationGenerator {
       declareModule(provide, isDefault, emitName);
     }
     // In order to typecheck in the presence of third-party externs, emit all extern symbols.
-    processExternSymbols();
+    if (System.getProperty("clutz.skipExternOutput") == null) {
+      processExternSymbols();
+    }
 
     // For the purposes of determining which provides have been emitted
     // combine original provides and rewritten ones.
     provides.addAll(rewrittenProvides);
-    processUnprovidedTypes(provides, transitiveProvides);
+    processUnprovidedTypes(provides, transitiveProvides, depgraph);
 
     checkState(indent == 0, "indent must be zero after printing, but is %s", indent);
     return out.toString();
@@ -552,7 +555,7 @@ class DeclarationGenerator {
           emit(":");
           TypedVar var = topScope.getOwnSlot(reservedProvide);
           if (var != null) {
-            TreeWalker walker = new TreeWalker(compiler.getTypeRegistry(), provides, false);
+            TreeWalker walker = new TreeWalker(compiler.getTypeRegistry(), provides, false, null);
             walker.visitType(var.getType());
           } else {
             emit("any");
@@ -598,7 +601,8 @@ class DeclarationGenerator {
    * positions. However, our emit phases only emits goog.provided symbols and namespaces, so this
    * extra pass is required, in order to have valid output.
    */
-  private void processUnprovidedTypes(Set<String> provides, Set<String> transitiveProvides) {
+  private void processUnprovidedTypes(
+      Set<String> provides, Set<String> transitiveProvides, Depgraph depgraph) {
     /**
      * A new set of types can be discovered while visiting unprovided types. To prevent an infinite
      * loop in a pathological case, limit to a number of passes.
@@ -637,7 +641,8 @@ class DeclarationGenerator {
             name,
             /* isDefault */ true,
             Collections.<String>emptySet(),
-            /* isExtern */ false);
+            /* isExtern */ false,
+            depgraph);
         typesEmitted.add(name);
       }
       // if no new types seen, safely break out.
@@ -725,7 +730,8 @@ class DeclarationGenerator {
           emitName,
           isDefault,
           shadowedSymbols,
-          true);
+          true,
+          null);
 
       if (isDefault && isClassLike(symbol.getType())) visitedClassLikes.add(symbol.getName());
       // we do not declare modules or goog.require support, because externs types should not be
@@ -809,9 +815,15 @@ class DeclarationGenerator {
       String emitName,
       boolean isDefault,
       Set<String> provides,
-      boolean isExtern) {
+      boolean isExtern,
+      Depgraph depgraph) {
     if (!isValidJSProperty(getUnqualifiedName(symbol))) {
       emitComment("skipping property " + symbol.getName() + " because it is not a valid symbol.");
+      return 0;
+    }
+    if (depgraph != null
+        && System.getProperty("clutz.skipTransitiveOutput") != null
+        && !depgraph.isRoot(symbol.getInputName())) {
       return 0;
     }
     if (GOOG_BASE_NAMESPACE.equals(namespace) && GOOG_BASE_NAMESPACE.equals(symbol.getName())) {
@@ -820,7 +832,8 @@ class DeclarationGenerator {
     } else {
       emitNamespaceBegin(namespace);
     }
-    TreeWalker treeWalker = new TreeWalker(compiler.getTypeRegistry(), provides, isExtern);
+    TreeWalker treeWalker =
+        new TreeWalker(compiler.getTypeRegistry(), provides, isExtern, depgraph);
     if (isDefault) {
       if (isPrivate(symbol.getJSDocInfo()) && !isConstructor(symbol.getJSDocInfo())) {
         treeWalker.emitPrivateValue(emitName);
@@ -1192,12 +1205,16 @@ class DeclarationGenerator {
     /** Whether the symbol we are walking was defined in an extern file */
     private final boolean isExtern;
 
+    private final Depgraph depgraph;
+
     private int valueSymbolsWalked = 0;
 
-    private TreeWalker(JSTypeRegistry typeRegistry, Set<String> provides, boolean isExtern) {
+    private TreeWalker(
+        JSTypeRegistry typeRegistry, Set<String> provides, boolean isExtern, Depgraph depgraph) {
       this.typeRegistry = typeRegistry;
       this.provides = provides;
       this.isExtern = isExtern;
+      this.depgraph = depgraph;
     }
 
     private String getAbsoluteName(ObjectType objectType) {
@@ -1213,6 +1230,11 @@ class DeclarationGenerator {
     }
 
     private void walk(TypedVar symbol, String emitName) {
+      if (depgraph != null
+          && System.getProperty("clutz.skipTransitiveOutput") != null
+          && !depgraph.isRoot(symbol.getInputName())) {
+        return;
+      }
       JSType type = symbol.getType();
       if (!type.isInterface() && !isTypedef(type)) valueSymbolsWalked++;
       if (type.isFunctionType() && !isNewableFunctionType((FunctionType) type)) {
